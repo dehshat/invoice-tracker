@@ -1,0 +1,11 @@
+name: Sync to Sheets
+on:
+  push:
+    paths:
+      - 'Invoices_Database.csv'
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Sheet Update
+        run: curl -L -X POST "YOUR_WEB_APP_URL_FROM_STEP_2"
