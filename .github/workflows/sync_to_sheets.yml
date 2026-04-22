@@ -8,4 +8,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Trigger Sheet Update
-        run: curl -L -X POST "YOUR_WEB_APP_URL_FROM_STEP_2"
+        run: curl -L -X POST "https://script.google.com/macros/s/AKfycbzYiLkIou2e3DYI15mZOVFYS_o8fB91qltkb4GDJQ4iXNdv6zxX4qgO-w6WdAG242N-/exec"
