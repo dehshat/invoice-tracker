@@ -78,7 +78,7 @@ if uploaded_file and st.button("Extract and Sync"):
         "AMC Start Date", "AMC End Date", "Mode of Payment", "Taxable Value", "GST Amount", "Total Amount"
         """
 
-        model = genai.GenerativeModel('gemini-3-flash')
+        model = genai.GenerativeModel('gemini-3.1-pro-preview')
         response = model.generate_content([doc, prompt])
         
         # Parse the JSON from the AI response
