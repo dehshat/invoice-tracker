@@ -1,201 +1,107 @@
-import streamlit as st
-import google.generativeai as genai
-import json
-import time
-import io
-import csv
-import requests
-from github import Github
+function doPost(e) {
+  try {
+    const token = PropertiesService.getScriptProperties().getProperty("GITHUB_TOKEN");
 
-# ---------------- SETUP ----------------
+    if (!token) {
+      return ContentService.createTextOutput("Script Error: Missing GITHUB_TOKEN");
+    }
 
-genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    const repo = "dehshat/invoice-tracker";
+    const path = "Invoices_Database.csv";
 
-g = Github(st.secrets["GITHUB_TOKEN"])
-repo = g.get_repo(st.secrets["REPO_NAME"])
+    const url = `https://api.github.com/repos/${repo}/contents/${path}`;
 
-APPS_SCRIPT_WEBAPP_URL = st.secrets["APPS_SCRIPT_WEBAPP_URL"]
+    const response = UrlFetchApp.fetch(url, {
+      method: "get",
+      headers: {
+        Authorization: "Bearer " + token,
+        Accept: "application/vnd.github.v3.raw"
+      },
+      muteHttpExceptions: true
+    });
 
-CSV_FILE_PATH = "Invoices_Database.csv"
+    if (response.getResponseCode() !== 200) {
+      return ContentService.createTextOutput("GitHub Error: " + response.getContentText());
+    }
 
-EXPECTED_HEADERS = [
-    "Buyer Name",
-    "Invoice Date",
-    "Invoice Number",
-    "Description",
-    "Model Number",
-    "Serial Number",
-    "AMC Start Date",
-    "AMC End Date",
-    "Mode of Payment",
-    "Taxable Value",
-    "GST Amount",
-    "Total Amount",
-    "Document Type"
-]
+    const content = response.getContentText();
+    let csvData = Utilities.parseCsv(content);
 
+    if (!csvData || csvData.length === 0) {
+      return ContentService.createTextOutput("Script Error: Empty CSV");
+    }
 
-# ---------------- FUNCTIONS ----------------
+    const headers = csvData[0];
 
-def clean_value(value):
-    value = str(value or "").replace("\n", " ").strip()
+    const amcStartIndex = headers.indexOf("AMC Start Date");
+    const amcEndIndex = headers.indexOf("AMC End Date");
+    let documentTypeIndex = headers.indexOf("Document Type");
 
-    if value.lower() in ["null", "none", "nan", "n/a", "na", "-"]:
-        return ""
+    if (amcStartIndex === -1 || amcEndIndex === -1) {
+      return ContentService.createTextOutput("Script Error: AMC columns not found");
+    }
 
-    return value
+    if (documentTypeIndex === -1) {
+      headers.push("Document Type");
+      documentTypeIndex = headers.length - 1;
+    }
 
+    for (let i = 1; i < csvData.length; i++) {
+      let row = csvData[i];
 
-def build_csv_content(extracted_data):
-    output = io.StringIO()
-    writer = csv.writer(output, quoting=csv.QUOTE_ALL)
+      while (row.length < headers.length) {
+        row.push("");
+      }
 
-    writer.writerow(EXPECTED_HEADERS)
+      let amcStart = cleanCell(row[amcStartIndex]);
+      let amcEnd = cleanCell(row[amcEndIndex]);
 
-    for item in extracted_data:
-        row = [
-            clean_value(item.get("Buyer Name")),
-            clean_value(item.get("Invoice Date")),
-            clean_value(item.get("Invoice Number")),
-            clean_value(item.get("Description")),
-            clean_value(item.get("Model Number")),
-            clean_value(item.get("Serial Number")),
-            clean_value(item.get("AMC Start Date")),
-            clean_value(item.get("AMC End Date")),
-            clean_value(item.get("Mode of Payment")),
-            clean_value(item.get("Taxable Value")),
-            clean_value(item.get("GST Amount")),
-            clean_value(item.get("Total Amount")),
+      if (amcStart === "" && amcEnd === "") {
+        row[documentTypeIndex] = "Service Charge";
+      } else {
+        row[documentTypeIndex] = "Invoice";
+      }
+    }
 
-            # Leave blank. Apps Script will calculate this.
-            ""
-        ]
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
 
-        writer.writerow(row)
+    sheet.clear();
 
-    return output.getvalue().strip()
+    sheet
+      .getRange(1, 1, csvData.length, headers.length)
+      .setValues(csvData);
 
+    sheet
+      .getRange(1, 1, 1, headers.length)
+      .setFontWeight("bold");
 
-def overwrite_csv_in_github(extracted_data):
-    new_csv_content = build_csv_content(extracted_data)
+    SpreadsheetApp.flush();
 
-    try:
-        file = repo.get_contents(CSV_FILE_PATH)
+    return ContentService.createTextOutput("Sync Successful");
 
-        repo.update_file(
-            path=file.path,
-            message="Overwrite invoice database with latest PDF data",
-            content=new_csv_content,
-            sha=file.sha
-        )
-
-    except Exception:
-        repo.create_file(
-            path=CSV_FILE_PATH,
-            message="Create invoice database",
-            content=new_csv_content
-        )
+  } catch (err) {
+    return ContentService.createTextOutput("Script Error: " + err.toString());
+  }
+}
 
 
-def sync_google_sheet():
-    time.sleep(2)
+function cleanCell(value) {
+  if (value === null || value === undefined) {
+    return "";
+  }
 
-    response = requests.post(
-        APPS_SCRIPT_WEBAPP_URL,
-        timeout=30
-    )
+  value = value.toString().trim();
 
-    if response.status_code != 200:
-        raise Exception("Google Sheet sync failed: " + response.text)
+  const badValues = ["null", "none", "nan", "n/a", "na", "-"];
 
-    if "Sync Successful" not in response.text:
-        raise Exception("Google Sheet sync returned error: " + response.text)
+  if (badValues.includes(value.toLowerCase())) {
+    return "";
+  }
 
-    return response.text
-
-
-def extract_invoice_data(uploaded_file):
-    with open("temp.pdf", "wb") as f:
-        f.write(uploaded_file.getbuffer())
-
-    doc = genai.upload_file(path="temp.pdf")
-
-    while doc.state.name == "PROCESSING":
-        time.sleep(2)
-        doc = genai.get_file(doc.name)
-
-    if doc.state.name == "FAILED":
-        raise Exception("Gemini file processing failed.")
-
-    prompt = """
-    Extract the following data from this invoice. Return the data ONLY as a JSON list of objects.
-    Each object in the list should represent one line item from the 'Description of Goods' table.
-
-    Rules for Extraction:
-    1. 'Buyer Name': Extract ONLY the hospital name. Remove all address info.
-    2. 'Model Number': Extract from the text in brackets, for example 'MEK-6510K'.
-    3. 'Serial Number': Extract from the text in brackets, for example '5857'.
-    4. 'AMC Start Date': Look at 'AMC Service Contract Term'. Extract the first date.
-    5. 'AMC End Date': Extract the second date in the same line.
-    6. 'Mode of Payment': From 'Mode/Terms of Payment'.
-    7. 'Description': The full text of the item description.
-    8. Do NOT create Document Type.
-
-    JSON Keys:
-    "Buyer Name",
-    "Invoice Date",
-    "Invoice Number",
-    "Description",
-    "Model Number",
-    "Serial Number",
-    "AMC Start Date",
-    "AMC End Date",
-    "Mode of Payment",
-    "Taxable Value",
-    "GST Amount",
-    "Total Amount"
-    """
-
-    model = genai.GenerativeModel("gemini-3.1-pro-preview")
-    response = model.generate_content([doc, prompt])
-
-    raw_json = (
-        response.text
-        .replace("```json", "")
-        .replace("```", "")
-        .strip()
-    )
-
-    data = json.loads(raw_json)
-
-    if not isinstance(data, list) or len(data) == 0:
-        raise Exception("AI did not return valid invoice data.")
-
-    return data
+  return value;
+}
 
 
-# ---------------- UI ----------------
-
-st.set_page_config(page_title="AI Invoice Processor")
-
-st.title("📄 AI Invoice Processor")
-
-uploaded_file = st.file_uploader("Upload Invoice PDF", type="pdf")
-
-if uploaded_file and st.button("Extract and Sync"):
-    try:
-        with st.spinner("AI is analyzing invoice..."):
-            data = extract_invoice_data(uploaded_file)
-
-        with st.spinner("Overwriting GitHub CSV with latest PDF data..."):
-            overwrite_csv_in_github(data)
-
-        with st.spinner("Syncing Google Sheet..."):
-            sync_result = sync_google_sheet()
-
-        st.success("Synced successfully!")
-        st.info(sync_result)
-        st.table(data)
-
-    except Exception as e:
-        st.error(f"Error: {str(e)}")
+function doGet(e) {
+  return doPost(e);
+}
